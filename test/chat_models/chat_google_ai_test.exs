@@ -2405,4 +2405,123 @@ defmodule ChatModels.ChatGoogleAITest do
       assert error.message =~ "Empty streaming response"
     end
   end
+
+  describe "reindex_deltas/1" do
+    setup do
+      {:ok, model: ChatGoogleAI.new!(%{stream: true, model: "gemini-2.5-flash"})}
+    end
+
+    test "same content type keeps same index throughout", %{model: model} do
+      delta1 = %MessageDelta{
+        content: ContentPart.text!("hello"),
+        index: 0,
+        role: :assistant,
+        status: :incomplete
+      }
+
+      delta2 = %MessageDelta{
+        content: ContentPart.text!(" world"),
+        index: 0,
+        role: :assistant,
+        status: :complete
+      }
+
+      expect(Req, :post, fn _req, _opts ->
+        {:ok, %Req.Response{status: 200, headers: %{}, body: [[delta1], [delta2]]}}
+      end)
+
+      {:ok, result} = ChatGoogleAI.call(model, [Message.new_user!("hi")])
+
+      assert [%MessageDelta{index: 0}, %MessageDelta{index: 0}] = result
+    end
+
+    test "content type change from thinking to text increments index", %{model: model} do
+      thinking_delta = %MessageDelta{
+        content: %ContentPart{type: :thinking, content: "let me think"},
+        index: 0,
+        role: :assistant,
+        status: :incomplete
+      }
+
+      text_delta = %MessageDelta{
+        content: ContentPart.text!("the answer"),
+        index: 0,
+        role: :assistant,
+        status: :complete
+      }
+
+      expect(Req, :post, fn _req, _opts ->
+        {:ok, %Req.Response{status: 200, headers: %{}, body: [[thinking_delta], [text_delta]]}}
+      end)
+
+      {:ok, result} = ChatGoogleAI.call(model, [Message.new_user!("think about it")])
+
+      assert [
+               %MessageDelta{index: 0, content: %ContentPart{type: :thinking}},
+               %MessageDelta{index: 1, content: %ContentPart{type: :text}}
+             ] = result
+    end
+
+    test "multiple deltas of same type before transition all share an index", %{model: model} do
+      thinking1 = %MessageDelta{
+        content: %ContentPart{type: :thinking, content: "step one"},
+        index: 0,
+        role: :assistant,
+        status: :incomplete
+      }
+
+      thinking2 = %MessageDelta{
+        content: %ContentPart{type: :thinking, content: "step two"},
+        index: 0,
+        role: :assistant,
+        status: :incomplete
+      }
+
+      text1 = %MessageDelta{
+        content: ContentPart.text!("first word"),
+        index: 0,
+        role: :assistant,
+        status: :incomplete
+      }
+
+      text2 = %MessageDelta{
+        content: ContentPart.text!(" second word"),
+        index: 0,
+        role: :assistant,
+        status: :complete
+      }
+
+      expect(Req, :post, fn _req, _opts ->
+        {:ok,
+         %Req.Response{
+           status: 200,
+           headers: %{},
+           body: [[thinking1], [thinking2], [text1], [text2]]
+         }}
+      end)
+
+      {:ok, result} = ChatGoogleAI.call(model, [Message.new_user!("think deeply")])
+
+      assert [
+               %MessageDelta{index: 0, content: %ContentPart{type: :thinking}},
+               %MessageDelta{index: 0, content: %ContentPart{type: :thinking}},
+               %MessageDelta{index: 1, content: %ContentPart{type: :text}},
+               %MessageDelta{index: 1, content: %ContentPart{type: :text}}
+             ] = result
+    end
+
+    test "nil content does not crash and does not increment index", %{model: model} do
+      nil_delta1 = %MessageDelta{content: nil, index: 0, role: :assistant, status: :incomplete}
+      nil_delta2 = %MessageDelta{content: nil, index: 0, role: :assistant, status: :complete}
+
+      expect(Req, :post, fn _req, _opts ->
+        {:ok, %Req.Response{status: 200, headers: %{}, body: [[nil_delta1], [nil_delta2]]}}
+      end)
+
+      {:ok, result} = ChatGoogleAI.call(model, [Message.new_user!("hi")])
+
+      assert [%MessageDelta{index: 0, content: nil}, %MessageDelta{index: 0, content: nil}] =
+               result
+    end
+  end
 end
