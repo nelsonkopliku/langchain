@@ -386,10 +386,28 @@ defmodule LangChain.MessageDelta do
          %MessageDelta{tool_calls: primary_calls} = acc
        ) do
     calls = primary_calls || []
-    initial = Enum.find(calls, &(&1.index == delta_call.index))
-    merged_call = ToolCall.merge(initial, delta_call)
-    %MessageDelta{acc | tool_calls: upsert_by_index(calls, merged_call)}
+
+    updated =
+      case Enum.find_index(calls, &mergeable?(&1, delta_call)) do
+        nil ->
+          calls ++ [delta_call]
+
+        pos ->
+          List.replace_at(calls, pos, ToolCall.merge(Enum.at(calls, pos), delta_call))
+      end
+
+    %MessageDelta{acc | tool_calls: updated}
   end
+
+  # A call that already arrived `:complete` is a whole call, not a fragment, so
+  # nothing may be appended to it. Providers that deliver every call in one
+  # piece (Google AI, Vertex AI) leave `index` nil on all of them, and index
+  # matching alone would then weld two distinct calls into one — `host_list`
+  # plus `cluster_list` accumulating into `host_listcluster_list`.
+  @spec mergeable?(ToolCall.t(), ToolCall.t()) :: boolean()
+  defp mergeable?(%ToolCall{status: :complete}, %ToolCall{status: :complete}), do: false
+  defp mergeable?(%ToolCall{index: index}, %ToolCall{index: index}), do: true
+  defp mergeable?(%ToolCall{}, %ToolCall{}), do: false
 
   @spec update_index(t(), t()) :: t()
   defp update_index(%MessageDelta{} = primary, %MessageDelta{index: idx}) when is_number(idx) do
@@ -406,15 +424,6 @@ defmodule LangChain.MessageDelta do
   end
 
   defp update_status(%MessageDelta{} = primary, %MessageDelta{}), do: primary
-
-  # Insert or update tool call in list by matching on index field
-  @spec upsert_by_index([ToolCall.t()], ToolCall.t()) :: [ToolCall.t()]
-  defp upsert_by_index(calls, call) do
-    case Enum.find_index(calls, &(&1.index == call.index)) do
-      nil -> calls ++ [call]
-      pos -> List.replace_at(calls, pos, call)
-    end
-  end
 
   @doc """
   Convert the MessageDelta's merged content to a string. Specify the type of

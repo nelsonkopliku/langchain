@@ -268,6 +268,137 @@ defmodule LangChain.MessageDeltaTest do
              ] = merged.tool_calls
     end
 
+    test "keeps parallel complete tool_calls distinct when carried in a single delta" do
+      # Google AI and Vertex AI deliver every function call whole and stamp no
+      # index on any of them. Merging by index alone would fold the second call
+      # into the first and concatenate the names into "host_listcluster_list".
+      initial = %MessageDelta{role: :assistant, status: :incomplete, tool_calls: nil}
+
+      parallel_delta =
+        %MessageDelta{
+          role: :assistant,
+          status: :incomplete,
+          tool_calls: [
+            %ToolCall{
+              status: :complete,
+              type: :function,
+              call_id: "call-host_list",
+              name: "host_list",
+              arguments: %{},
+              index: nil
+            },
+            %ToolCall{
+              status: :complete,
+              type: :function,
+              call_id: "call-cluster_list",
+              name: "cluster_list",
+              arguments: %{},
+              index: nil
+            }
+          ]
+        }
+
+      merged = MessageDelta.merge_delta(initial, parallel_delta)
+
+      assert [
+               %ToolCall{name: "host_list", call_id: "call-host_list"},
+               %ToolCall{name: "cluster_list", call_id: "call-cluster_list"}
+             ] = merged.tool_calls
+    end
+
+    test "keeps parallel complete tool_calls distinct when split over deltas" do
+      # Same providers, but the two calls land in consecutive chunks. A
+      # positional index assigned per chunk would still collide at 0, so the
+      # `:complete` status is what keeps them apart.
+      deltas = [
+        %MessageDelta{role: :assistant, status: :incomplete, tool_calls: nil},
+        %MessageDelta{
+          role: :assistant,
+          status: :incomplete,
+          tool_calls: [
+            %ToolCall{
+              status: :complete,
+              type: :function,
+              call_id: "call-host_list",
+              name: "host_list",
+              arguments: %{},
+              index: nil
+            }
+          ]
+        },
+        %MessageDelta{
+          role: :assistant,
+          status: :incomplete,
+          tool_calls: [
+            %ToolCall{
+              status: :complete,
+              type: :function,
+              call_id: "call-cluster_list",
+              name: "cluster_list",
+              arguments: %{},
+              index: nil
+            }
+          ]
+        }
+      ]
+
+      merged = MessageDelta.merge_deltas(deltas)
+
+      assert [
+               %ToolCall{name: "host_list"},
+               %ToolCall{name: "cluster_list"}
+             ] = merged.tool_calls
+    end
+
+    test "still accumulates an incomplete tool_call finished by a complete fragment" do
+      # OpenAI's terminal fragment arrives `:complete` on top of an accumulating
+      # `:incomplete` call. That pairing must keep merging.
+      initial =
+        %MessageDelta{
+          role: :assistant,
+          index: 0,
+          status: :incomplete,
+          tool_calls: [
+            %ToolCall{
+              status: :incomplete,
+              type: :function,
+              call_id: "call_abc",
+              name: "read_file",
+              arguments: "{\"file_path\":",
+              index: 0
+            }
+          ]
+        }
+
+      final_fragment =
+        %MessageDelta{
+          role: :unknown,
+          index: 0,
+          status: :incomplete,
+          tool_calls: [
+            %ToolCall{
+              status: :complete,
+              type: :function,
+              call_id: nil,
+              name: nil,
+              arguments: " \"/Memories/dad_jokes.txt\"}",
+              index: 0
+            }
+          ]
+        }
+
+      merged = MessageDelta.merge_delta(initial, final_fragment)
+
+      assert [
+               %ToolCall{
+                 status: :complete,
+                 name: "read_file",
+                 arguments: "{\"file_path\": \"/Memories/dad_jokes.txt\"}",
+                 index: 0
+               }
+             ] = merged.tool_calls
+    end
+
     test "correctly merges assistant content with a tool_call" do
       merged = delta_content_with_function_call() |> List.flatten() |> MessageDelta.merge_deltas()
 

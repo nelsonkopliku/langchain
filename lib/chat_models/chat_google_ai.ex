@@ -917,11 +917,15 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
         %{"functionCall" => %{"args" => raw_args, "name" => name}} = data,
         _
       ) do
+    # Google AI never fragments a function call across chunks and never stamps
+    # an index on one, so each is `:complete` on arrival. Leaving it
+    # `:incomplete` lets the delta merger treat two parallel calls as fragments
+    # of one and concatenate their names.
     %{
       call_id: "call-#{name}",
       name: name,
       arguments: raw_args,
-      complete: true,
+      status: :complete,
       index: data["index"],
       metadata:
         if(data["thoughtSignature"],

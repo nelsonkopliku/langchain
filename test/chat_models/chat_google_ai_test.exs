@@ -887,6 +887,63 @@ defmodule ChatModels.ChatGoogleAITest do
       assert call.metadata == nil
     end
 
+    test "marks a received function call complete", %{model: model} do
+      # Google AI delivers each function call whole and stamps no index on it.
+      # An `:incomplete` call with a nil index reads as a fragment to the delta
+      # merger, which then welds parallel calls together.
+      response = %{
+        "candidates" => [
+          %{
+            "content" => %{
+              "role" => "model",
+              "parts" => [%{"functionCall" => %{"args" => %{}, "name" => "host_list"}}]
+            },
+            "finishReason" => "STOP",
+            "index" => 0
+          }
+        ]
+      }
+
+      assert [%MessageDelta{} = delta] =
+               ChatGoogleAI.do_process_response(model, response, MessageDelta)
+
+      assert [%ToolCall{status: :complete, name: "host_list"}] = delta.tool_calls
+    end
+
+    test "keeps parallel function calls in one chunk distinct", %{model: model} do
+      response = %{
+        "candidates" => [
+          %{
+            "content" => %{
+              "role" => "model",
+              "parts" => [
+                %{"functionCall" => %{"args" => %{}, "name" => "host_list"}},
+                %{"functionCall" => %{"args" => %{}, "name" => "cluster_list"}}
+              ]
+            },
+            "finishReason" => "STOP",
+            "index" => 0
+          }
+        ]
+      }
+
+      assert [%MessageDelta{} = delta] =
+               ChatGoogleAI.do_process_response(model, response, MessageDelta)
+
+      # Merging the chunk into an accumulator must not concatenate the names
+      # into "host_listcluster_list".
+      merged =
+        MessageDelta.merge_delta(
+          %MessageDelta{role: :assistant, status: :incomplete},
+          delta
+        )
+
+      assert [
+               %ToolCall{name: "host_list"},
+               %ToolCall{name: "cluster_list"}
+             ] = merged.tool_calls
+    end
+
     test "handles no parts in content", %{model: model} do
       response = %{
         "candidates" => [
